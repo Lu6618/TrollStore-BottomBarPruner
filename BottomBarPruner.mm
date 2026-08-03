@@ -182,20 +182,6 @@ static NSArray<UIViewController *> *BBPFilteredViewControllers(NSArray<UIViewCon
     return filtered.count > 0 ? [filtered copy] : viewControllers;
 }
 
-static NSArray<UITabBarItem *> *BBPFilteredTabBarItems(NSArray<UITabBarItem *> *items) {
-    if (!BBPIsCurrentBundleAllowed() || items.count == 0) {
-        return items;
-    }
-
-    NSMutableArray<UITabBarItem *> *filtered = [NSMutableArray array];
-    [items enumerateObjectsUsingBlock:^(UITabBarItem *item, NSUInteger index, BOOL *stop) {
-        if (BBPShouldKeepItem(item, index)) {
-            [filtered addObject:item];
-        }
-    }];
-    return filtered.count > 0 ? [filtered copy] : items;
-}
-
 #pragma mark - Safe UITabBarController integration
 
 static void BBPSwizzle(Class cls, SEL original, SEL replacement) {
