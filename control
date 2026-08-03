@@ -1,0 +1,8 @@
+Package: com.defaultfolder.bottombarpruner
+Name: BottomBarPruner
+Version: 1.0.0
+Architecture: iphoneos-arm64e
+Description: TrollStore injectable dylib that keeps selected UIKit tab bar items.
+Maintainer: BottomBarPruner
+Author: BottomBarPruner
+Section: Tweaks

@@ -1,0 +1,53 @@
+name: Build TrollStore BottomBarPruner dylib
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+permissions:
+  contents: read
+
+env:
+  ARCHS: arm64e
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Prepare Theos
+        uses: Randomblock1/theos-action@v1
+        with:
+          theos-dir: '${{ github.workspace }}/theos'
+          theos-src: 'https://github.com/roothide/theos'
+          theos-sdks: 'https://github.com/theos/sdks'
+          theos-sdks-branch: 'master'
+
+      - name: Build arm64e dylib
+        shell: bash
+        run: |
+          set -euxo pipefail
+          export THEOS="$GITHUB_WORKSPACE/theos"
+          make clean all ARCHS=arm64e
+          mkdir -p dist
+          DYLIB=$(find .theos -type f -name 'BottomBarPruner.dylib' | head -n 1)
+          test -n "$DYLIB"
+          cp "$DYLIB" dist/BottomBarPruner.dylib
+          cp BottomBarPruner-Config.plist dist/BottomBarPruner.plist
+          cp README.md dist/README.md
+          tar -czf dist/BottomBarPruner-TrollStore.tar.gz -C dist BottomBarPruner.dylib BottomBarPruner.plist README.md
+          ls -la dist
+
+      - name: Upload dylib artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BottomBarPruner-TrollStore-arm64e
+          path: dist/*
+          if-no-files-found: error
