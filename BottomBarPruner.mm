@@ -196,7 +196,7 @@ static NSArray<UITabBarItem *> *BBPFilteredTabBarItems(NSArray<UITabBarItem *> *
     return filtered.count > 0 ? [filtered copy] : items;
 }
 
-#pragma mark - Swizzling
+#pragma mark - Safe UITabBarController integration
 
 static void BBPSwizzle(Class cls, SEL original, SEL replacement) {
     Method originalMethod = class_getInstanceMethod(cls, original);
@@ -207,65 +207,85 @@ static void BBPSwizzle(Class cls, SEL original, SEL replacement) {
     method_exchangeImplementations(originalMethod, replacementMethod);
 }
 
-@interface UITabBarController (BBPInjected)
+static void BBPApplyToTabBarController(UITabBarController *controller) {
+    if (!controller || !BBPIsCurrentBundleAllowed()) {
+        return;
+    }
+
+    @try {
+        NSArray<UIViewController *> *current = controller.viewControllers;
+        // Do not touch small or unusual controller stacks.
+        if (current.count < 3) {
+            return;
+        }
+
+        NSArray<UIViewController *> *filtered = BBPFilteredViewControllers(current);
+        if (filtered.count == current.count || filtered.count < 2) {
+            return;
+        }
+
+        UIViewController *selected = controller.selectedViewController;
+        [controller setViewControllers:filtered animated:NO];
+        if (selected && [filtered containsObject:selected]) {
+            controller.selectedViewController = selected;
+        } else if (filtered.firstObject) {
+            controller.selectedViewController = filtered.firstObject;
+        }
+    } @catch (NSException *exception) {
+        (void)exception;
+        // A third-party app may use a non-standard tab controller. Leave it untouched.
+    }
+}
+
+@interface UITabBarController (BBPSafeInjected)
 @end
 
-@implementation UITabBarController (BBPInjected)
+@implementation UITabBarController (BBPSafeInjected)
 
-- (void)bbp_setViewControllers:(NSArray<UIViewController *> *)viewControllers animated:(BOOL)animated {
-    NSArray *filtered = BBPFilteredViewControllers(viewControllers);
-    [self bbp_setViewControllers:filtered animated:animated];
+- (void)bbp_safe_viewDidAppear:(BOOL)animated {
+    [self bbp_safe_viewDidAppear:animated];
     dispatch_async(dispatch_get_main_queue(), ^{
-        [self bbp_applyCurrentConfiguration];
+        BBPApplyToTabBarController(self);
     });
 }
 
-- (void)bbp_viewDidLoad {
-    [self bbp_viewDidLoad];
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [self bbp_applyCurrentConfiguration];
-    });
-}
+@end
 
-- (void)bbp_viewDidAppear:(BOOL)animated {
-    [self bbp_viewDidAppear:animated];
-    [self bbp_applyCurrentConfiguration];
-}
-
-- (void)bbp_viewDidLayoutSubviews {
-    [self bbp_viewDidLayoutSubviews];
-    [self bbp_applyCurrentConfiguration];
-}
-
-- (void)bbp_applyCurrentConfiguration {
+static void BBPApplyToVisibleControllers(void) {
     if (!BBPIsCurrentBundleAllowed()) {
         return;
     }
-    NSArray<UIViewController *> *current = self.viewControllers;
-    NSArray<UIViewController *> *filtered = BBPFilteredViewControllers(current);
-    if (filtered.count != current.count) {
-        UIViewController *selected = self.selectedViewController;
-        [self bbp_setViewControllers:filtered animated:NO];
-        if (selected && [filtered containsObject:selected]) {
-            self.selectedViewController = selected;
-        } else if (filtered.firstObject) {
-            self.selectedViewController = filtered.firstObject;
+
+    UIApplication *application = UIApplication.sharedApplication;
+    NSMutableArray<UIWindow *> *windows = [NSMutableArray array];
+    if (@available(iOS 13.0, *)) {
+        for (UIScene *scene in application.connectedScenes) {
+            if (![scene isKindOfClass:[UIWindowScene class]]) {
+                continue;
+            }
+            [windows addObjectsFromArray:((UIWindowScene *)scene).windows ?: @[]];
+        }
+    } else {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        [windows addObjectsFromArray:application.windows ?: @[]];
+#pragma clang diagnostic pop
+    }
+
+    for (UIWindow *window in windows) {
+        UIViewController *controller = window.rootViewController;
+        if ([controller isKindOfClass:[UITabBarController class]]) {
+            BBPApplyToTabBarController((UITabBarController *)controller);
+        }
+        UIViewController *presented = controller.presentedViewController;
+        while (presented) {
+            if ([presented isKindOfClass:[UITabBarController class]]) {
+                BBPApplyToTabBarController((UITabBarController *)presented);
+            }
+            presented = presented.presentedViewController;
         }
     }
 }
-
-@end
-
-@interface UITabBar (BBPInjected)
-@end
-
-@implementation UITabBar (BBPInjected)
-
-- (void)bbp_setItems:(NSArray<UITabBarItem *> *)items animated:(BOOL)animated {
-    [self bbp_setItems:BBPFilteredTabBarItems(items) animated:animated];
-}
-
-@end
 
 static void BBPInstallHooks(void) {
     if (!BBPIsCurrentBundleAllowed()) {
@@ -273,16 +293,24 @@ static void BBPInstallHooks(void) {
     }
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        BBPSwizzle(UITabBarController.class, @selector(setViewControllers:animated:), @selector(bbp_setViewControllers:animated:));
-        BBPSwizzle(UITabBarController.class, @selector(viewDidLoad), @selector(bbp_viewDidLoad));
-        BBPSwizzle(UITabBarController.class, @selector(viewDidAppear:), @selector(bbp_viewDidAppear:));
-        BBPSwizzle(UITabBarController.class, @selector(viewDidLayoutSubviews), @selector(bbp_viewDidLayoutSubviews));
-        BBPSwizzle(UITabBar.class, @selector(setItems:animated:), @selector(bbp_setItems:animated:));
+        // Only hook the lifecycle callback. We deliberately do not hook UITabBar
+        // setItems: or viewDidLayoutSubviews because those can break private tab
+        // bar bookkeeping in third-party applications.
+        BBPSwizzle(UITabBarController.class, @selector(viewDidAppear:), @selector(bbp_safe_viewDidAppear:));
+
+        NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
+        [center addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(__unused NSNotification *note) {
+            BBPApplyToVisibleControllers();
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.75 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                BBPApplyToVisibleControllers();
+            });
+        }];
     });
 }
 
 __attribute__((constructor)) static void BBPConstructor(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         BBPInstallHooks();
+        BBPApplyToVisibleControllers();
     });
 }
